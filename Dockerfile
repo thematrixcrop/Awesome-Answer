@@ -15,7 +15,7 @@ RUN answer build \
     --output /usr/bin/new_answer
 
 FROM alpine
-LABEL maintainer="linkinstar@apache.org"
+LABEL maintainer="awesome-answer@thematrixcrop.com"
 
 ARG TIMEZONE
 ENV TIMEZONE=${TIMEZONE:-"Asia/Shanghai"}
