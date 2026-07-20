@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { readFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  DEFAULT_BLACKLIST_PATH,
   DESCRIPTOR_SOURCE,
+  createPluginBlacklist,
   createPluginManifest,
   renderDockerfile,
 } from "../scripts/render-dockerfile.mjs";
@@ -82,6 +84,63 @@ test("changes the SHA-256 when any JSON content changes", async () => {
   assert.notEqual(original.sha256, changed.sha256);
 });
 
+test("filters a blacklisted plugin and preserves both input digests", () => {
+  const descriptor = JSON.stringify({
+    en_US: [
+      {
+        link: "https://github.com/apache/answer-plugins/tree/main/cache-redis",
+      },
+      {
+        link: "https://github.com/apache/answer-plugins/tree/main/user-center-slack",
+      },
+    ],
+  });
+  const blacklistContent = JSON.stringify({
+    "github.com/apache/answer-plugins/user-center-slack": "Broken upstream build",
+  });
+  const blacklist = createPluginBlacklist(blacklistContent, { log: silentLog });
+  const manifest = createPluginManifest(descriptor, {
+    blacklist: blacklist.plugins,
+    blacklistSha256: blacklist.sha256,
+    log: silentLog,
+  });
+
+  assert.equal(manifest.pluginCount, 1);
+  assert.deepEqual(manifest.plugins, [
+    "github.com/apache/answer-plugins/cache-redis",
+  ]);
+  assert.match(blacklist.sha256, /^[a-f0-9]{64}$/);
+  assert.match(manifest.sha256, /^[a-f0-9]{64}$/);
+});
+
+test("rejects malformed blacklist entries", () => {
+  assert.throws(
+    () => createPluginBlacklist("[]", { log: silentLog }),
+    /object of plugin reasons/,
+  );
+  assert.throws(
+    () =>
+      createPluginBlacklist(
+        JSON.stringify({
+          "https://github.com/apache/answer-plugins/tree/main/cache-redis":
+            "Use the module path",
+        }),
+        { log: silentLog },
+      ),
+    /Invalid plugin path/,
+  );
+  assert.throws(
+    () =>
+      createPluginBlacklist(
+        JSON.stringify({
+          "github.com/apache/answer-plugins/cache-redis": "",
+        }),
+        { log: silentLog },
+      ),
+    /non-empty reason/,
+  );
+});
+
 test("rejects malformed descriptors and unsupported plugin links", () => {
   const cases = [
     {
@@ -151,6 +210,10 @@ test("renders every plugin argument and all manifest labels", async (testContext
   const writtenManifest = JSON.parse(
     await readFile(result.manifestPath, "utf8"),
   );
+  const blacklistContent = await readFile(DEFAULT_BLACKLIST_PATH);
+  const expectedBlacklistSha256 = createPluginBlacklist(blacklistContent, {
+    log: silentLog,
+  }).sha256;
 
   assert.equal((dockerfile.match(/--with /g) ?? []).length, 3);
   for (const plugin of EXPECTED_PLUGINS) {
@@ -169,7 +232,17 @@ test("renders every plugin argument and all manifest labels", async (testContext
   );
   assert.ok(
     dockerfile.includes(
+      `ARG PLUGINS_BLACKLIST_SHA256="${expectedBlacklistSha256}"`,
+    ),
+  );
+  assert.ok(
+    dockerfile.includes(
       `io.awesome-answer.plugins.manifest-sha256="${result.manifest.sha256}"`,
+    ),
+  );
+  assert.ok(
+    dockerfile.includes(
+      `io.awesome-answer.plugins.blacklist-sha256="${expectedBlacklistSha256}"`,
     ),
   );
   assert.ok(
@@ -183,4 +256,34 @@ test("renders every plugin argument and all manifest labels", async (testContext
     ),
   );
   assert.deepEqual(writtenManifest, result.manifest);
+});
+
+test("uses the repository blacklist when rendering a descriptor", async (testContext) => {
+  const outputDirectory = await createTemporaryDirectory(testContext);
+  const descriptorPath = path.join(outputDirectory, "descriptor.json");
+  await writeFile(
+    descriptorPath,
+    JSON.stringify({
+      en_US: [
+        {
+          link: "https://github.com/apache/answer-plugins/tree/main/cache-redis",
+        },
+        {
+          link: "https://github.com/apache/answer-plugins/tree/main/user-center-slack",
+        },
+      ],
+    }),
+  );
+
+  const result = await renderDockerfile({
+    descriptorFile: descriptorPath,
+    outputDirectory,
+    log: silentLog,
+  });
+
+  assert.deepEqual(result.manifest.plugins, [
+    "github.com/apache/answer-plugins/cache-redis",
+  ]);
+  assert.equal(result.manifest.pluginCount, 1);
+  assert.ok(!result.renderedDockerfile.includes("user-center-slack"));
 });

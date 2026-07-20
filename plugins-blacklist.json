@@ -1,0 +1,3 @@
+{
+  "github.com/apache/answer-plugins/user-center-slack": "The upstream main branch currently fails with undefined: resty in notification.go:113. Remove this entry after the plugin is fixed upstream."
+}

@@ -13,7 +13,12 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPOSITORY_ROOT = path.resolve(path.dirname(SCRIPT_PATH), "..");
 const DEFAULT_TEMPLATE_PATH = path.join(REPOSITORY_ROOT, "Dockerfile.ejs");
 const DEFAULT_OUTPUT_DIRECTORY = path.join(REPOSITORY_ROOT, ".generated");
+export const DEFAULT_BLACKLIST_PATH = path.join(
+  REPOSITORY_ROOT,
+  "plugins-blacklist.json",
+);
 const GITHUB_PATH_PREFIX = "/apache/answer-plugins/tree/main/";
+const PLUGIN_MODULE_PREFIX = "github.com/apache/answer-plugins/";
 const PLUGIN_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 function writeLog(level, event, details = {}) {
@@ -50,7 +55,7 @@ export const logger = {
   },
 };
 
-function asBuffer(rawContent) {
+function asBuffer(rawContent, label = "plugin descriptor") {
   if (Buffer.isBuffer(rawContent)) {
     return rawContent;
   }
@@ -59,7 +64,36 @@ function asBuffer(rawContent) {
     return Buffer.from(rawContent);
   }
 
-  throw new TypeError("The plugin descriptor must be a string or a byte buffer.");
+  throw new TypeError(`The ${label} must be a string or a byte buffer.`);
+}
+
+function hashContent(rawContent, label) {
+  return createHash("sha256").update(asBuffer(rawContent, label)).digest("hex");
+}
+
+function normalizePluginPath(pluginPath, location) {
+  const relativePath =
+    typeof pluginPath === "string" &&
+    pluginPath.startsWith(PLUGIN_MODULE_PREFIX)
+    ? pluginPath.slice(PLUGIN_MODULE_PREFIX.length)
+    : "";
+  const segments = relativePath.split("/");
+  const hasValidPath =
+    relativePath.length > 0 &&
+    segments.every(
+      (segment) =>
+        segment !== "." &&
+        segment !== ".." &&
+        PLUGIN_SEGMENT_PATTERN.test(segment),
+    );
+
+  if (!hasValidPath) {
+    throw new Error(
+      `Invalid plugin path at ${location}: expected "${PLUGIN_MODULE_PREFIX}<plugin-path>".`,
+    );
+  }
+
+  return `${PLUGIN_MODULE_PREFIX}${relativePath}`;
 }
 
 function parsePluginLink(link, location) {
@@ -75,7 +109,6 @@ function parsePluginLink(link, location) {
   const relativePath = parsedLink.pathname.startsWith(GITHUB_PATH_PREFIX)
     ? parsedLink.pathname.slice(GITHUB_PATH_PREFIX.length)
     : "";
-  const segments = relativePath.split("/");
   const isCanonical =
     parsedLink.protocol === "https:" &&
     parsedLink.hostname === "github.com" &&
@@ -85,31 +118,30 @@ function parsePluginLink(link, location) {
     parsedLink.search === "" &&
     parsedLink.hash === "" &&
     link === `https://github.com${GITHUB_PATH_PREFIX}${relativePath}`;
-  const hasValidPath =
-    relativePath.length > 0 &&
-    segments.every(
-      (segment) =>
-        segment !== "." &&
-        segment !== ".." &&
-        PLUGIN_SEGMENT_PATTERN.test(segment),
-    );
-
-  if (!isCanonical || !hasValidPath) {
+  if (!isCanonical) {
     throw new Error(
       `Invalid plugin link at ${location}: expected ` +
         '"https://github.com/apache/answer-plugins/tree/main/<plugin-path>".',
     );
   }
 
-  return `github.com/apache/answer-plugins/${relativePath}`;
+  return normalizePluginPath(
+    `${PLUGIN_MODULE_PREFIX}${relativePath}`,
+    location,
+  );
 }
 
 export function createPluginManifest(
   rawContent,
-  { source = DESCRIPTOR_SOURCE, log = logger } = {},
+  {
+    source = DESCRIPTOR_SOURCE,
+    blacklist = [],
+    blacklistSha256 = hashContent("{}", "plugin blacklist"),
+    log = logger,
+  } = {},
 ) {
   const descriptorBuffer = asBuffer(rawContent);
-  const sha256 = createHash("sha256").update(descriptorBuffer).digest("hex");
+  const sha256 = hashContent(descriptorBuffer, "plugin descriptor");
 
   let descriptor;
   try {
@@ -171,22 +203,88 @@ export function createPluginManifest(
   }
 
   const sortedPlugins = [...plugins].sort();
+  if (!Array.isArray(blacklist)) {
+    throw new TypeError("The plugin blacklist must be an array of plugin paths.");
+  }
+  const blacklistSet = new Set(blacklist);
+  for (const blacklistedPlugin of blacklistSet) {
+    normalizePluginPath(blacklistedPlugin, "plugin blacklist");
+    if (!plugins.has(blacklistedPlugin)) {
+      log.warn("blacklist.plugin.not_found", { plugin: blacklistedPlugin });
+    }
+  }
+
+  const selectedPlugins = sortedPlugins.filter(
+    (plugin) => !blacklistSet.has(plugin),
+  );
+  const excludedPlugins = sortedPlugins.filter((plugin) =>
+    blacklistSet.has(plugin),
+  );
+  if (selectedPlugins.length === 0) {
+    throw new Error("The plugin blacklist excludes every plugin in the descriptor.");
+  }
+
   const manifest = {
     source,
     sha256,
-    pluginCount: sortedPlugins.length,
-    plugins: sortedPlugins,
+    pluginCount: selectedPlugins.length,
+    plugins: selectedPlugins,
   };
 
   log.info("descriptor.parsed", {
     localeCount: locales.length,
     entryCount,
     duplicateCount: entryCount - sortedPlugins.length,
+    blacklistedCount: excludedPlugins.length,
+    upstreamPluginCount: sortedPlugins.length,
     pluginCount: manifest.pluginCount,
     sha256,
+    blacklistSha256,
   });
 
   return manifest;
+}
+
+export function createPluginBlacklist(
+  rawContent,
+  { log = logger } = {},
+) {
+  const blacklistBuffer = asBuffer(rawContent, "plugin blacklist");
+  const sha256 = hashContent(blacklistBuffer, "plugin blacklist");
+
+  let blacklist;
+  try {
+    blacklist = JSON.parse(blacklistBuffer.toString("utf8"));
+  } catch (error) {
+    throw new Error(`The plugin blacklist is not valid JSON: ${error.message}`, {
+      cause: error,
+    });
+  }
+
+  if (
+    blacklist === null ||
+    typeof blacklist !== "object" ||
+    Array.isArray(blacklist)
+  ) {
+    throw new Error("The plugin blacklist must be an object of plugin reasons.");
+  }
+
+  for (const [pluginPath, reason] of Object.entries(blacklist)) {
+    normalizePluginPath(pluginPath, `plugin blacklist key "${pluginPath}"`);
+    if (typeof reason !== "string" || reason.trim().length === 0) {
+      throw new Error(
+        `Plugin blacklist entry "${pluginPath}" must contain a non-empty reason.`,
+      );
+    }
+  }
+
+  const plugins = Object.keys(blacklist).sort();
+  log.info("blacklist.parsed", {
+    pluginCount: plugins.length,
+    sha256,
+  });
+
+  return { plugins, sha256 };
 }
 
 async function readDescriptor({ descriptorFile, fetchImplementation, log }) {
@@ -230,8 +328,33 @@ async function readDescriptor({ descriptorFile, fetchImplementation, log }) {
   return content;
 }
 
+async function readBlacklist({ blacklistFile, log }) {
+  if (blacklistFile === null) {
+    const content = Buffer.from("{}");
+    log.info("blacklist.read.completed", {
+      inputType: "disabled",
+      bytes: content.byteLength,
+    });
+    return content;
+  }
+
+  const resolvedBlacklistPath = path.resolve(blacklistFile);
+  log.info("blacklist.read.started", {
+    inputType: "file",
+    location: resolvedBlacklistPath,
+  });
+  const content = await readFile(resolvedBlacklistPath);
+  log.info("blacklist.read.completed", {
+    inputType: "file",
+    location: resolvedBlacklistPath,
+    bytes: content.byteLength,
+  });
+  return content;
+}
+
 export async function renderDockerfile({
   descriptorFile,
+  blacklistFile = DEFAULT_BLACKLIST_PATH,
   outputDirectory = DEFAULT_OUTPUT_DIRECTORY,
   templatePath = DEFAULT_TEMPLATE_PATH,
   fetchImplementation = globalThis.fetch,
@@ -246,14 +369,24 @@ export async function renderDockerfile({
     fetchImplementation,
     log,
   });
-  const manifest = createPluginManifest(descriptorContent, { log });
+  const blacklistContent = await readBlacklist({ blacklistFile, log });
+  const blacklist = createPluginBlacklist(blacklistContent, { log });
+  const manifest = createPluginManifest(descriptorContent, {
+    blacklist: blacklist.plugins,
+    blacklistSha256: blacklist.sha256,
+    log,
+  });
+  const renderManifest = {
+    ...manifest,
+    blacklistSha256: blacklist.sha256,
+  };
 
   const resolvedTemplatePath = path.resolve(templatePath);
   log.info("template.read.started", { location: resolvedTemplatePath });
   const template = await readFile(resolvedTemplatePath, "utf8");
   const renderedDockerfile = ejs.render(
     template,
-    { manifest },
+    { manifest: renderManifest },
     { filename: resolvedTemplatePath },
   );
 
@@ -274,12 +407,16 @@ export async function renderDockerfile({
     manifestPath,
     pluginCount: manifest.pluginCount,
     sha256: manifest.sha256,
+    blacklistSha256: blacklist.sha256,
+    blacklistPluginCount: blacklist.plugins.length,
   });
 
   return {
     dockerfilePath,
     manifestPath,
     manifest,
+    blacklistSha256: blacklist.sha256,
+    blacklistPlugins: blacklist.plugins,
     renderedDockerfile,
   };
 }
@@ -289,19 +426,21 @@ function parseArguments(argumentsToParse) {
 
   for (let index = 0; index < argumentsToParse.length; index += 1) {
     const argument = argumentsToParse[index];
-    if (argument !== "--descriptor-file") {
+    if (argument !== "--descriptor-file" && argument !== "--blacklist-file") {
       throw new Error(`Unknown argument: ${argument}`);
     }
 
-    const descriptorFile = argumentsToParse[index + 1];
-    if (!descriptorFile || descriptorFile.startsWith("--")) {
-      throw new Error("--descriptor-file requires a file path.");
+    const filePath = argumentsToParse[index + 1];
+    if (!filePath || filePath.startsWith("--")) {
+      throw new Error(`${argument} requires a file path.`);
     }
-    if (options.descriptorFile) {
-      throw new Error("--descriptor-file can only be specified once.");
+    const optionName =
+      argument === "--descriptor-file" ? "descriptorFile" : "blacklistFile";
+    if (Object.hasOwn(options, optionName)) {
+      throw new Error(`${argument} can only be specified once.`);
     }
 
-    options.descriptorFile = descriptorFile;
+    options[optionName] = filePath;
     index += 1;
   }
 

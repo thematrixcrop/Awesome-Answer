@@ -9,7 +9,8 @@ RUN apk --no-cache add \
     npm install -g pnpm@9.7.0
 
 ARG PLUGINS_MANIFEST_SHA256="<%= manifest.sha256 %>"
-RUN echo "Building plugins from manifest ${PLUGINS_MANIFEST_SHA256}" && \
+ARG PLUGINS_BLACKLIST_SHA256="<%= manifest.blacklistSha256 %>"
+RUN echo "Building plugins from manifest ${PLUGINS_MANIFEST_SHA256} with blacklist ${PLUGINS_BLACKLIST_SHA256}" && \
     answer build \
 <% for (const plugin of manifest.plugins) { -%>
         --with <%= plugin %> \
@@ -19,6 +20,7 @@ RUN echo "Building plugins from manifest ${PLUGINS_MANIFEST_SHA256}" && \
 FROM alpine
 LABEL org.opencontainers.image.authors="awesome-answer@thematrixcrop.com" \
       io.awesome-answer.plugins.manifest-sha256="<%= manifest.sha256 %>" \
+      io.awesome-answer.plugins.blacklist-sha256="<%= manifest.blacklistSha256 %>" \
       io.awesome-answer.plugins.count="<%= manifest.pluginCount %>" \
       io.awesome-answer.plugins.source="<%= manifest.source %>"
 
