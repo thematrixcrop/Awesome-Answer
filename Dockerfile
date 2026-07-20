@@ -15,7 +15,7 @@ RUN answer build \
     --output /usr/bin/new_answer
 
 FROM alpine
-LABEL maintainer="awesome-answer@thematrixcrop.com"
+LABEL org.opencontainers.image.authors="awesome-answer@thematrixcrop.com"
 
 ARG TIMEZONE
 ENV TIMEZONE=${TIMEZONE:-"Asia/Shanghai"}
