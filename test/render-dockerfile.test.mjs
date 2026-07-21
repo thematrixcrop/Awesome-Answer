@@ -231,6 +231,7 @@ test("renders every plugin argument and all manifest labels", async (testContext
   }
 
   assert.ok(dockerfile.includes("FROM apache/answer:2.0.1 AS answer-builder"));
+  assert.ok(dockerfile.includes("FROM golang:1.25-alpine AS golang-builder"));
   assert.ok(
     dockerfile.includes(
       `ARG PLUGINS_MANIFEST_SHA256="${result.manifest.sha256}"`,
@@ -275,7 +276,7 @@ test("uses the repository blacklist when rendering a descriptor", async (testCon
           link: "https://github.com/apache/answer-plugins/tree/main/cache-redis",
         },
         {
-          link: "https://github.com/apache/answer-plugins/tree/main/user-center-slack",
+          link: "https://github.com/apache/answer-plugins/tree/main/connector-wallet",
         },
       ],
     }),
@@ -292,7 +293,7 @@ test("uses the repository blacklist when rendering a descriptor", async (testCon
     "github.com/apache/answer-plugins/cache-redis",
   ]);
   assert.equal(result.manifest.pluginCount, 1);
-  assert.ok(!result.renderedDockerfile.includes("user-center-slack"));
+  assert.ok(!result.renderedDockerfile.includes("connector-wallet"));
 });
 
 test("requires a stable Answer release tag", async (testContext) => {
